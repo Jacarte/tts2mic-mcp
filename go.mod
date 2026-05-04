@@ -2,7 +2,10 @@ module github.com/Jacarte/tts2mic-mcp
 
 go 1.25.5
 
-require github.com/mark3labs/mcp-go v0.50.0
+require (
+	github.com/gen2brain/malgo v0.11.24
+	github.com/mark3labs/mcp-go v0.50.0
+)
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
