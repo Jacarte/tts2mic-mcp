@@ -1,2 +1,5 @@
 # TTS cache
 .tts2mic-cache/
+
+# envs
+.env
