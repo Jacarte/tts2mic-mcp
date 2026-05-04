@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "tts2mic": {
+      "type": "local",
+      "command": [
+        "go",
+        "run",
+        "./cmd/tts2mic-mcp"
+      ],
+      "enabled": true,
+      "environment": {
+        "TTS_CACHE_DIR": ".tts2mic-cache",
+        "TTS_PROVIDER_NAME": "stub",
+        "TTS_LANG": "en-US"
+      }
+    }
+  }
+}
