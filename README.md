@@ -157,7 +157,7 @@ Then:
 1. Open **Audio MIDI Setup**.
 2. Confirm `BlackHole 2ch` exists.
 3. In your browser app, select `BlackHole 2ch` as the microphone.
-4. Inject speech:
+4. Inject speech (sine test without provider):
 
 ```bash
 go run ./cmd/tts2mic-mcp speak \
@@ -172,20 +172,10 @@ You can override that lookup if needed:
 export TTS2MIC_MACOS_OUTPUT_DEVICE="BlackHole 2ch"
 ```
 
-If you want the older debug behavior, you can still force the backend to use `afplay`, which sends audio to the current macOS default output instead of opening BlackHole directly:
 
-```bash
-export TTS2MIC_MACOS_DEBUG_AFPLAY=1
-go run ./cmd/tts2mic-mcp speak \
-  --target macos-blackhole \
-  --text "hello world"
-```
+As a use case, in Playwright, your app can select the mic the same way a user would. For apps that expose an input selector, select `BlackHole 2ch`. For apps using `navigator.mediaDevices.enumerateDevices()`, choose the audio input whose label contains `BlackHole` after microphone permission is granted.
 
-The legacy `TTS2MIC_ALLOW_SYSTEM_OUTPUT_ROUTE=1` switch still enables that same `afplay` path for compatibility.
-
-In Playwright, your app can select the mic the same way a user would. For apps that expose an input selector, select `BlackHole 2ch`. For apps using `navigator.mediaDevices.enumerateDevices()`, choose the audio input whose label contains `BlackHole` after microphone permission is granted.
-
-## Linux: simulated microphone with PipeWire/PulseAudio
+## Linux: simulated microphone with PipeWire/PulseAudio (not tested yet)
 
 Create a virtual sink and monitor source:
 
