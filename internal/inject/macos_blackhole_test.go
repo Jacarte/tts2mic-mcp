@@ -43,6 +43,33 @@ func TestDecodePCM16WAVRejectsInvalidHeader(t *testing.T) {
 	}
 }
 
+func TestDecodePCM16WAVRejectsMisalignedPCMData(t *testing.T) {
+	wav := []byte{
+		'R', 'I', 'F', 'F',
+		0x28, 0x00, 0x00, 0x00,
+		'W', 'A', 'V', 'E',
+		'f', 'm', 't', ' ',
+		0x10, 0x00, 0x00, 0x00,
+		0x01, 0x00,
+		0x02, 0x00,
+		0x80, 0x3e, 0x00, 0x00,
+		0x00, 0xfa, 0x00, 0x00,
+		0x04, 0x00,
+		0x10, 0x00,
+		'd', 'a', 't', 'a',
+		0x03, 0x00, 0x00, 0x00,
+		0x01, 0x02, 0x03,
+	}
+
+	_, err := decodePCM16WAV(wav)
+	if err == nil {
+		t.Fatal("decodePCM16WAV() error = nil, want alignment error")
+	}
+	if !strings.Contains(err.Error(), "not aligned") {
+		t.Fatalf("decodePCM16WAV() error = %q, want alignment error", err)
+	}
+}
+
 func TestFindDeviceNameIndex(t *testing.T) {
 	names := []string{"MacBook Pro Speakers", "BlackHole 2ch", "External Monitor"}
 
@@ -66,6 +93,31 @@ func TestFindDeviceNameIndex(t *testing.T) {
 			}
 			if gotIndex != tc.index {
 				t.Fatalf("findDeviceNameIndex() index = %d, want %d", gotIndex, tc.index)
+			}
+		})
+	}
+}
+
+func TestShouldUseAFPlayDebug(t *testing.T) {
+	tests := []struct {
+		name   string
+		env    map[string]string
+		wanted bool
+	}{
+		{name: "no flags", env: map[string]string{}, wanted: false},
+		{name: "debug flag", env: map[string]string{macOSDebugAFPlayEnv: "1"}, wanted: true},
+		{name: "legacy flag", env: map[string]string{"TTS2MIC_ALLOW_SYSTEM_OUTPUT_ROUTE": "1"}, wanted: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string {
+				return tc.env[key]
+			}
+
+			got := shouldUseAFPlayDebug(getenv)
+			if got != tc.wanted {
+				t.Fatalf("shouldUseAFPlayDebug() = %v, want %v", got, tc.wanted)
 			}
 		})
 	}

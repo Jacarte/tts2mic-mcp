@@ -1,6 +1,6 @@
 # tts2mic-mcp
 
-`tts2mic-mcp` is a Go-based MCP-style tool server for end-to-end testing browser voice applications by injecting TTS-generated audio into a simulated microphone.
+`tts2mic-mcp` is a Go-based MCP server for end-to-end testing browser voice applications by injecting TTS-generated audio into a simulated microphone.
 
 The intended flow is:
 
@@ -27,19 +27,20 @@ The main use case is testing browser apps where Playwright or another automation
 This is an early scaffold. It currently includes:
 
 - Go CLI entrypoint
-- simple JSON-over-stdio MCP-style tool loop
+- MCP server over stdio using `mcp-go`
 - `speak` tool
 - pluggable TTS provider interface
 - deterministic local TTS stub
+- ElevenLabs provider
 - filesystem PCM cache
 - WAV encoding
-- macOS BlackHole backend
+- macOS BlackHole backend with direct device-targeted playback
 - Linux PipeWire/PulseAudio backend
 - Chrome fake-audio-file backend
 - setup scripts
 - GitHub Actions CI
 
-A real MCP SDK transport and real cloud TTS providers are still TODO.
+It is still intentionally small, but the core MCP transport is already in place.
 
 ## Install / build
 
@@ -57,9 +58,9 @@ go run ./cmd/tts2mic-mcp speak \
   --out /tmp/tts2mic.wav
 ```
 
-## How to use as an MCP-style server
+## How to use as an MCP server
 
-The current scaffold exposes a minimal JSON-over-stdio tool loop. It is intentionally simple so the transport can later be replaced with a real MCP SDK server.
+The server runs over stdio using `mcp-go` and currently exposes a single tool, `speak`.
 
 Start the server:
 
@@ -143,6 +144,7 @@ type SpeakInput struct {
 ## macOS: simulated microphone with BlackHole
 
 For browser E2E testing on macOS, use BlackHole so the browser sees a real selectable microphone device.
+The `macos-blackhole` backend now opens a playback device directly through CoreAudio via `malgo`, so it does not need the current macOS system output to be switched just to inject speech.
 
 Install/setup:
 
@@ -154,15 +156,32 @@ Then:
 
 1. Open **Audio MIDI Setup**.
 2. Confirm `BlackHole 2ch` exists.
-3. Set system output to `BlackHole 2ch`, or configure an Aggregate/Multi-Output device if you also want to hear audio.
-4. In your browser app, select `BlackHole 2ch` as the microphone.
-5. Inject speech:
+3. In your browser app, select `BlackHole 2ch` as the microphone.
+4. Inject speech:
 
 ```bash
 go run ./cmd/tts2mic-mcp speak \
   --target macos-blackhole \
   --text "hello world"
 ```
+
+By default the backend looks for the first playback device whose name contains `BlackHole`.
+You can override that lookup if needed:
+
+```bash
+export TTS2MIC_MACOS_OUTPUT_DEVICE="BlackHole 2ch"
+```
+
+If you want the older debug behavior, you can still force the backend to use `afplay`, which sends audio to the current macOS default output instead of opening BlackHole directly:
+
+```bash
+export TTS2MIC_MACOS_DEBUG_AFPLAY=1
+go run ./cmd/tts2mic-mcp speak \
+  --target macos-blackhole \
+  --text "hello world"
+```
+
+The legacy `TTS2MIC_ALLOW_SYSTEM_OUTPUT_ROUTE=1` switch still enables that same `afplay` path for compatibility.
 
 In Playwright, your app can select the mic the same way a user would. For apps that expose an input selector, select `BlackHole 2ch`. For apps using `navigator.mediaDevices.enumerateDevices()`, choose the audio input whose label contains `BlackHole` after microphone permission is granted.
 
@@ -256,23 +275,41 @@ When real providers are added, the cache key should also include any options tha
 
 ## TTS providers
 
-The current provider is a deterministic local sine-wave stub so the project builds and tests without credentials.
+The project currently supports two providers:
 
-Future providers can be configured with environment variables, for example:
+- **Default test provider**: a deterministic local sine-wave stub used when `TTS_PROVIDER` is unset or set to anything other than `elevenlabs`
+- **Real provider**: ElevenLabs, selected with `TTS_PROVIDER=elevenlabs`
+
+Default local test setup:
 
 ```bash
-export TTS_PROVIDER=azure
-export AZURE_SPEECH_KEY=...
-export AZURE_SPEECH_REGION=...
-export AZURE_SPEECH_VOICE=en-US-JennyNeural
+unset TTS_PROVIDER
+export TTS_PROVIDER_NAME=stub
+export TTS_LANG=en-US
 ```
+
+ElevenLabs setup:
+
+```bash
+export TTS_PROVIDER=elevenlabs
+export ELEVENLABS_API_KEY=...
+export ELEVENLABS_VOICE_ID=...
+export ELEVENLABS_MODEL_ID=eleven_multilingual_v2
+export ELEVENLABS_OUTPUT_FORMAT=pcm_16000
+```
+
+Notes:
+
+- `ELEVENLABS_OUTPUT_FORMAT` defaults to `pcm_16000`.
+- If no `voice` is passed to `speak`, the ElevenLabs backend falls back to `ELEVENLABS_VOICE_ID`.
+- `TTS_PROVIDER_NAME` is used as part of the cache key and defaults to `stub` or the value of `TTS_PROVIDER`.
 
 ## Roadmap
 
-- Replace the JSON-over-stdio loop with a real MCP SDK server.
-- Add Azure / ElevenLabs / OpenAI TTS providers.
-- Add real-time CoreAudio output on macOS instead of `afplay`.
+- Add additional real TTS providers beyond ElevenLabs, such as Azure or OpenAI.
+- Add richer device controls for the macOS CoreAudio backend, such as explicit device listing and selection helpers.
 - Add 48 kHz resampling for browser/STT realism.
 - Add Playwright helpers for selecting the simulated microphone.
 - Add transcript assertion helpers.
+- Add better MCP ergonomics, such as tool discovery metadata and higher-level testing helpers.
 - Add audio fixtures for noise, silence, barge-in, long utterances, and multi-turn flows.

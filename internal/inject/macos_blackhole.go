@@ -24,15 +24,13 @@ const (
 type macosBlackhole struct{}
 
 func (m *macosBlackhole) Inject(ctx context.Context, wav []byte) error {
-
 	deviceName := os.Getenv(macOSOutputDeviceEnv)
 	if deviceName == "" {
 		deviceName = defaultBlackHoleDevice
 	}
 
-	if os.Getenv(macOSDebugAFPlayEnv) == "1" {
-		fmt.Fprintf(os.Stderr, "Debug mode enabled via %s=1; would play on device %q but playing with afplay instead\n", macOSDebugAFPlayEnv, deviceName)
-		playWithAFPlay(ctx, wav)
+	if shouldUseAFPlayDebug(os.Getenv) {
+		return playWithAFPlay(ctx, wav)
 	}
 
 	return playWAVOnDevice(ctx, wav, deviceName)
@@ -104,6 +102,9 @@ func playWAVOnDevice(ctx context.Context, wav []byte, deviceName string) error {
 
 			if copied < requested {
 				clear(output[copied:requested])
+			}
+
+			if offset >= len(pcm) {
 				doneOnce.Do(func() { close(done) })
 			}
 		},
@@ -202,6 +203,9 @@ func decodePCM16WAV(wav []byte) (decodedWAV, error) {
 	if channels == 0 {
 		return decodedWAV{}, fmt.Errorf("wav channels missing")
 	}
+	if len(pcm)%(int(channels)*2) != 0 {
+		return decodedWAV{}, fmt.Errorf("wav data length %d is not aligned to %d-channel int16 frames", len(pcm), channels)
+	}
 
 	return decodedWAV{
 		pcm:        pcm,
@@ -251,4 +255,8 @@ func findDeviceNameIndex(names []string, wanted string) (int, bool) {
 
 func normalizeDeviceName(v string) string {
 	return strings.ToLower(strings.TrimSpace(v))
+}
+
+func shouldUseAFPlayDebug(getenv func(string) string) bool {
+	return getenv(macOSDebugAFPlayEnv) == "1" || getenv("TTS2MIC_ALLOW_SYSTEM_OUTPUT_ROUTE") == "1"
 }
