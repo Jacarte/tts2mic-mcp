@@ -8,14 +8,16 @@ import (
     "io"
     "net/http"
     "os"
+    "strconv"
 
     "github.com/Jacarte/tts2mic-mcp/internal/cache"
 )
 
-// ElevenLabs provider
-// Docs: https://api.elevenlabs.io
+// ElevenLabs provider.
+// Requests raw PCM directly from ElevenLabs using output_format.
+// Default output format: pcm_16000
 
-const elevenlabsURL = "https://api.elevenlabs.io/v1/text-to-speech/%s"
+const elevenlabsURL = "https://api.elevenlabs.io/v1/text-to-speech/%s?output_format=%s"
 
 type elevenLabsProvider struct{}
 
@@ -32,19 +34,29 @@ func (e *elevenLabsProvider) Synthesize(ctx context.Context, text, voice string)
         return nil, 0, fmt.Errorf("voice not provided and ELEVENLABS_VOICE_ID not set")
     }
 
-    // cache
+    outputFormat := os.Getenv("ELEVENLABS_OUTPUT_FORMAT")
+    if outputFormat == "" {
+        outputFormat = "pcm_16000"
+    }
+    sampleRate := elevenLabsSampleRate(outputFormat)
+
     st := cacheStore()
-    key := cache.NewKey(lang(), voice, providerName(), text)
+    key := cache.NewKey(lang(), voice, providerName()+"-"+outputFormat, text)
 
     if b, ok, err := st.Get(key); err == nil && ok {
-        return bytesToInt16(b), 16000, nil
+        return bytesToInt16(b), sampleRate, nil
     } else if err != nil {
         return nil, 0, err
     }
 
+    modelID := os.Getenv("ELEVENLABS_MODEL_ID")
+    if modelID == "" {
+        modelID = "eleven_multilingual_v2"
+    }
+
     payload := map[string]any{
         "text": text,
-        "model_id": "eleven_multilingual_v2",
+        "model_id": modelID,
         "voice_settings": map[string]any{
             "stability": 0.5,
             "similarity_boost": 0.75,
@@ -53,14 +65,14 @@ func (e *elevenLabsProvider) Synthesize(ctx context.Context, text, voice string)
 
     body, _ := json.Marshal(payload)
 
-    req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf(elevenlabsURL, voice), bytes.NewReader(body))
+    req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf(elevenlabsURL, voice, outputFormat), bytes.NewReader(body))
     if err != nil {
         return nil, 0, err
     }
 
     req.Header.Set("xi-api-key", apiKey)
     req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("Accept", "audio/mpeg")
+    req.Header.Set("Accept", "audio/pcm")
 
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
@@ -73,11 +85,30 @@ func (e *elevenLabsProvider) Synthesize(ctx context.Context, text, voice string)
         return nil, 0, fmt.Errorf("elevenlabs error: %s", string(b))
     }
 
-    mp3Data, err := io.ReadAll(resp.Body)
+    pcmBytes, err := io.ReadAll(resp.Body)
     if err != nil {
         return nil, 0, err
     }
 
-    // NOTE: ElevenLabs returns MP3. For now we return error unless decoded.
-    return nil, 0, fmt.Errorf("mp3 decoding not implemented yet (%d bytes)", len(mp3Data))
+    pcm := bytesToInt16(pcmBytes)
+    if pcm == nil {
+        return nil, 0, fmt.Errorf("elevenlabs returned invalid PCM byte length: %d", len(pcmBytes))
+    }
+
+    _ = st.Set(key, pcmBytes)
+
+    return pcm, sampleRate, nil
+}
+
+func elevenLabsSampleRate(outputFormat string) int {
+    // Expected forms include pcm_16000, pcm_22050, pcm_24000, pcm_44100.
+    const prefix = "pcm_"
+    if len(outputFormat) <= len(prefix) || outputFormat[:len(prefix)] != prefix {
+        return 16000
+    }
+    sr, err := strconv.Atoi(outputFormat[len(prefix):])
+    if err != nil || sr <= 0 {
+        return 16000
+    }
+    return sr
 }
