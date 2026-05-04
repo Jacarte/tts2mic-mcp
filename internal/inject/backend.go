@@ -13,6 +13,8 @@ func NewBackend(name string) Backend {
     switch name {
     case "chrome-file":
         return &chromeFile{}
+    case "pipewire":
+        return &pipewire{}
     default:
         return &noop{}
     }
