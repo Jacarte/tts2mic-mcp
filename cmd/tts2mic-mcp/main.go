@@ -2,17 +2,17 @@ package main
 
 import (
     "context"
-    "encoding/json"
     "flag"
     "fmt"
     "os"
+
+    "github.com/mark3labs/mcp-go/mcp"
+    "github.com/mark3labs/mcp-go/server"
 
     "github.com/Jacarte/tts2mic-mcp/internal/audio"
     "github.com/Jacarte/tts2mic-mcp/internal/inject"
     "github.com/Jacarte/tts2mic-mcp/internal/tts"
 )
-
-// Simple CLI + JSON tool loop (stdio) scaffold
 
 func main() {
     if len(os.Args) > 1 && os.Args[1] == "speak" {
@@ -20,34 +20,34 @@ func main() {
         return
     }
 
-    // stdio JSON loop (very minimal MCP-like)
-    dec := json.NewDecoder(os.Stdin)
-    enc := json.NewEncoder(os.Stdout)
+    srv := server.NewMCPServer(
+        "tts2mic-mcp",
+        "0.1.0",
+        server.WithToolCapabilities(true),
+    )
 
-    for {
-        var req map[string]any
-        if err := dec.Decode(&req); err != nil {
-            return
+    speakTool := mcp.NewTool("speak",
+        mcp.WithDescription("Synthesize text to speech and inject into a simulated microphone"),
+        mcp.WithString("target", mcp.Required()),
+        mcp.WithString("text", mcp.Required()),
+        mcp.WithString("voice"),
+    )
+
+    srv.AddTool(speakTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+        target, _ := req.Params.Arguments["target"].(string)
+        text, _ := req.Params.Arguments["text"].(string)
+        voice, _ := req.Params.Arguments["voice"].(string)
+
+        err := Speak(ctx, SpeakInput{Target: target, Text: text, Voice: voice})
+        if err != nil {
+            return mcp.NewToolResultError(err.Error()), nil
         }
+        return mcp.NewToolResultText("ok"), nil
+    })
 
-        name, _ := req["name"].(string)
-        args, _ := req["arguments"].(map[string]any)
-
-        switch name {
-        case "speak":
-            var in SpeakInput
-            b, _ := json.Marshal(args)
-            _ = json.Unmarshal(b, &in)
-
-            err := Speak(context.Background(), in)
-            if err != nil {
-                _ = enc.Encode(map[string]any{"error": err.Error()})
-                continue
-            }
-            _ = enc.Encode(map[string]any{"ok": true})
-        default:
-            _ = enc.Encode(map[string]any{"error": "unknown tool"})
-        }
+    if err := server.ServeStdio(srv); err != nil {
+        fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+        os.Exit(1)
     }
 }
 
@@ -61,7 +61,6 @@ func speakCLI() {
 
     in := SpeakInput{Target: *target, Text: *text, Voice: *voice}
     if *target == "chrome-file" {
-        // force output path for file backend
         inject.SetOutputPath(*out)
     }
 
