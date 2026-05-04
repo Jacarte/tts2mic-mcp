@@ -15,6 +15,8 @@ func NewBackend(name string) Backend {
         return &chromeFile{}
     case "pipewire":
         return &pipewire{}
+    case "macos-blackhole":
+        return &macosBlackhole{}
     default:
         return &noop{}
     }
