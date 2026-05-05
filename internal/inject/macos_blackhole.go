@@ -30,7 +30,7 @@ func (m *macosBlackhole) Inject(ctx context.Context, wav []byte) error {
 	}
 
 	if shouldUseAFPlayDebug(os.Getenv) {
-		return playWithAFPlay(ctx, wav)
+		playWithAFPlay(ctx, wav)
 	}
 
 	return playWAVOnDevice(ctx, wav, deviceName)
