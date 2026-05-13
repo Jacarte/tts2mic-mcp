@@ -1,6 +1,9 @@
 package inject
 
 import (
+	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -120,5 +123,85 @@ func TestShouldUseAFPlayDebug(t *testing.T) {
 				t.Fatalf("shouldUseAFPlayDebug() = %v, want %v", got, tc.wanted)
 			}
 		})
+	}
+}
+
+func TestPlayWithAFPlayWritesDebugWAVOnMissingBinary(t *testing.T) {
+	originalPath := os.Getenv("PATH")
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", originalPath)
+		_ = os.Remove(defaultDebugWAVPath)
+	})
+
+	if err := os.Setenv("PATH", ""); err != nil {
+		t.Fatalf("Setenv(PATH) error = %v", err)
+	}
+
+	wav, err := audio.EncodeWAV([]int16{1, -1, 2, -2}, 16000, 1)
+	if err != nil {
+		t.Fatalf("EncodeWAV() error = %v", err)
+	}
+
+	err = playWithAFPlay(t.Context(), wav)
+	if err == nil {
+		t.Fatal("playWithAFPlay() error = nil, want command lookup error")
+	}
+	if !strings.Contains(err.Error(), "afplay") {
+		t.Fatalf("playWithAFPlay() error = %q, want afplay-related error", err)
+	}
+
+	written, err := os.ReadFile(defaultDebugWAVPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", defaultDebugWAVPath, err)
+	}
+	if string(written) != string(wav) {
+		t.Fatalf("written wav content mismatch: got %d bytes, want %d bytes", len(written), len(wav))
+	}
+}
+
+func TestMacOSBlackholeInjectDebugMirrorsToBothOutputs(t *testing.T) {
+	originalAFPlay := playWithAFPlayImpl
+	originalDevice := playWAVOnDeviceImpl
+	t.Cleanup(func() {
+		playWithAFPlayImpl = originalAFPlay
+		playWAVOnDeviceImpl = originalDevice
+	})
+
+	t.Setenv(macOSDebugAFPlayEnv, "1")
+
+	wav := []byte("wav-bytes")
+	var called []string
+
+	playWithAFPlayImpl = func(ctx context.Context, gotWAV []byte) error {
+		called = append(called, "afplay")
+		if string(gotWAV) != string(wav) {
+			t.Fatalf("playWithAFPlayImpl got wav = %q, want %q", string(gotWAV), string(wav))
+		}
+		return errors.New("afplay failed")
+	}
+
+	playWAVOnDeviceImpl = func(ctx context.Context, gotWAV []byte, deviceName string) error {
+		called = append(called, "device:"+deviceName)
+		if string(gotWAV) != string(wav) {
+			t.Fatalf("playWAVOnDeviceImpl got wav = %q, want %q", string(gotWAV), string(wav))
+		}
+		return nil
+	}
+
+	err := (&macosBlackhole{}).Inject(t.Context(), wav)
+	if err == nil {
+		t.Fatal("Inject() error = nil, want afplay failure to be preserved")
+	}
+	if !strings.Contains(err.Error(), "afplay failed") {
+		t.Fatalf("Inject() error = %q, want afplay failure", err)
+	}
+	if len(called) != 2 {
+		t.Fatalf("Inject() called %v, want both afplay and device", called)
+	}
+	if called[0] != "afplay" {
+		t.Fatalf("Inject() first call = %q, want afplay", called[0])
+	}
+	if called[1] != "device:BlackHole" {
+		t.Fatalf("Inject() second call = %q, want device:BlackHole", called[1])
 	}
 }

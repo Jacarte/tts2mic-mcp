@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 )
 
 const (
+	defaultDebugWAVPath    = "/tmp/tts2mic.wav"
 	macOSDebugAFPlayEnv    = "TTS2MIC_MACOS_DEBUG_AFPLAY"
 	macOSOutputDeviceEnv   = "TTS2MIC_MACOS_OUTPUT_DEVICE"
 	defaultBlackHoleDevice = "BlackHole"
@@ -23,6 +25,9 @@ const (
 
 type macosBlackhole struct{}
 
+var playWithAFPlayImpl = playWithAFPlay
+var playWAVOnDeviceImpl = playWAVOnDevice
+
 func (m *macosBlackhole) Inject(ctx context.Context, wav []byte) error {
 	deviceName := os.Getenv(macOSOutputDeviceEnv)
 	if deviceName == "" {
@@ -30,14 +35,16 @@ func (m *macosBlackhole) Inject(ctx context.Context, wav []byte) error {
 	}
 
 	if shouldUseAFPlayDebug(os.Getenv) {
-		playWithAFPlay(ctx, wav)
+		afplayErr := playWithAFPlayImpl(ctx, wav)
+		deviceErr := playWAVOnDeviceImpl(ctx, wav, deviceName)
+		return errors.Join(afplayErr, deviceErr)
 	}
 
-	return playWAVOnDevice(ctx, wav, deviceName)
+	return playWAVOnDeviceImpl(ctx, wav, deviceName)
 }
 
 func playWithAFPlay(ctx context.Context, wav []byte) error {
-	tmp := "/tmp/tts2mic.wav"
+	tmp := defaultDebugWAVPath
 	if err := os.WriteFile(tmp, wav, 0o644); err != nil {
 		return err
 	}

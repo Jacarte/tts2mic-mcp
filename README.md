@@ -299,7 +299,7 @@ Notes:
 - Add additional real TTS providers beyond ElevenLabs, such as Azure or OpenAI.
 - Add richer device controls for the macOS CoreAudio backend, such as explicit device listing and selection helpers.
 - Add 48 kHz resampling for browser/STT realism.
-- Add Playwright helpers for selecting the simulated microphone.
+- Add Playwright-oriented helpers for browser E2E flows, such as selecting the simulated microphone and asserting setup state.
 - Add transcript assertion helpers.
-- Add better MCP ergonomics, such as tool discovery metadata and higher-level testing helpers.
+- Add higher-level MCP/testing ergonomics on top of the existing server, such as richer tool metadata and reusable test helpers.
 - Add audio fixtures for noise, silence, barge-in, long utterances, and multi-turn flows.
