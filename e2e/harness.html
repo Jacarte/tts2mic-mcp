@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>TTS2Mic audio conformance</title>
+<button id="start">Start microphone</button>
+<button id="play">Play output fixture</button>
+<script type="module">
+import { audioConstraints, openTestMicrophone } from './microphone.mjs';
+import { createCapture, captureFrames } from './track-capture.mjs';
+let context, source, stream, reader, captureTask, processor;
+let rawReady = false, renderReady = false;
+window.mic = createCapture();
+window.renderedMic = {samples: [], rate: 0};
+window.input = {mode: new URLSearchParams(location.search).get('input') || 'explicit'};
+function ready() { window.ready = rawReady && renderReady; }
+window.stopCapture = async () => {
+  window.mic.recording = false;
+  if (processor) window.input.discardedFrames = processor.discardedFrames ?? null;
+  if (reader) {
+    try { await reader.cancel(); } catch (error) { window.problem ||= String(error); }
+    await captureTask;
+    reader = undefined;
+  }
+  stream?.getTracks().forEach(track => track.stop());
+  if (context && context.state !== 'closed') await context.close();
+};
+document.querySelector('#start').onclick = async () => {
+  try {
+    context = new AudioContext();
+    await context.resume();
+    if (window.input.mode === 'explicit') {
+      stream = await openTestMicrophone(navigator.mediaDevices, window.input);
+    } else if (window.input.mode === 'default') {
+      stream = await navigator.mediaDevices.getUserMedia({audio: {...audioConstraints}});
+      const track = stream.getAudioTracks()[0];
+      window.input.captured = {label: track.label, settings: track.getSettings()};
+    } else {
+      throw new Error(`Unknown input mode: ${window.input.mode}`);
+    }
+
+    // Read original getUserMedia AudioData, before Web Audio adapts microphone
+    // frames to the independently clocked output destination. This is an
+    // observer of a real device track, not an injected or generated stream.
+    if (typeof MediaStreamTrackProcessor !== 'function') {
+      throw new Error('Pinned Chromium must support audio MediaStreamTrackProcessor');
+    }
+    processor = new MediaStreamTrackProcessor({track: stream.getAudioTracks()[0], maxBufferSize: 256});
+    reader = processor.readable.getReader();
+    window.input.capturePoint = 'getUserMedia AudioData (before Web Audio)';
+    captureTask = captureFrames(reader, window.mic, () => { rawReady = true; ready(); })
+      .catch(error => { window.problem = String(error); });
+
+    // Retain the old Web Audio path as a separate diagnostic. It must not be
+    // mistaken for a lossless copy of the microphone's original audio frames.
+    window.renderedMic.rate = context.sampleRate;
+    const url = URL.createObjectURL(new Blob([`
+      registerProcessor('capture', class extends AudioWorkletProcessor {
+        process(inputs) {
+          const channel = inputs[0]?.[0];
+          if (channel) this.port.postMessage(channel.slice());
+          return true;
+        }
+      });
+    `], {type: 'text/javascript'}));
+    try { await context.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+    source = context.createMediaStreamSource(stream);
+    const capture = new AudioWorkletNode(context, 'capture');
+    capture.port.onmessage = event => {
+      renderReady = true; ready();
+      if (window.mic.recording && window.renderedMic.samples.length < 20 * context.sampleRate) {
+        window.renderedMic.samples.push(...event.data);
+      }
+    };
+    const silent = context.createGain(); silent.gain.value = 0;
+    source.connect(capture).connect(silent).connect(context.destination);
+  } catch (error) {
+    window.problem = String(error);
+    await window.stopCapture();
+  }
+};
+document.querySelector('#play').onclick = async () => {
+  try {
+    window.outputEnded = false;
+    const bytes = await (await fetch('/output.wav')).arrayBuffer();
+    const buffer = await context.decodeAudioData(bytes);
+    const player = context.createBufferSource(); player.buffer = buffer;
+    player.connect(context.destination);
+    player.onended = () => { window.outputEnded = true; };
+    player.start();
+  } catch (error) { window.problem = String(error); }
+};
+</script>

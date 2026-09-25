@@ -4,13 +4,49 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: go build ./...
-      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  audio-conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build isolated Linux audio environment
+        run: docker build -f ci/Dockerfile -t tts2mic-audio-ci .
+      - name: Exercise real browser audio without network or credentials
+        run: docker run --name tts2mic-audio-ci --init --shm-size=1g --network=none tts2mic-audio-ci
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker cp tts2mic-audio-ci:/work/artifacts/. artifacts/ || true
+          docker logs tts2mic-audio-ci > artifacts/container.log 2>&1 || true
+          docker rm -f tts2mic-audio-ci || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-audio-conformance
+          path: artifacts/
+          retention-days: 7
