@@ -1,5 +1,6 @@
-# TTS cache
 .tts2mic-cache/
-
-# envs
+.tts2mic-clips/
+bin/
 .env
+node_modules/
+artifacts/

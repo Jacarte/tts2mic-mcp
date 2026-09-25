@@ -1,0 +1,7 @@
+.fail
+load-module module-native-protocol-unix
+load-module module-null-sink sink_name=tts2mic_tx rate=48000 channels=1 channel_map=mono
+load-module module-remap-source source_name=tts2mic_mic master=tts2mic_tx.monitor channels=1 channel_map=mono master_channel_map=mono source_properties=device.description=TTS2Mic
+load-module module-null-sink sink_name=tts2mic_rx rate=48000 channels=2
+set-default-source tts2mic_mic
+set-default-sink tts2mic_rx

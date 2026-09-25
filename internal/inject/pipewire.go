@@ -1,30 +1,54 @@
 package inject
 
 import (
-    "bytes"
-    "context"
-    "os/exec"
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+
+	"github.com/Jacarte/tts2mic-mcp/internal/audio"
 )
 
-// PipeWire/PulseAudio compatible backend using pactl/paplay
-// It plays the WAV to a virtual sink so its monitor becomes a microphone.
-
+// pipewire uses the PulseAudio protocol, including pipewire-pulse. An explicit
+// sink prevents accidental playback through the developer's system speakers.
 type pipewire struct{}
 
-func (p *pipewire) Inject(ctx context.Context, wav []byte) error {
-    // paplay reads from stdin and sends to default sink or specified sink via env PULSE_SINK
-    cmd := exec.CommandContext(ctx, "paplay", "--raw", "--rate=16000", "--channels=1", "--format=s16le")
-
-    // If user set PULSE_SINK env var, paplay will route to that sink (e.g. tts2mic_sink)
-    cmd.Stdin = bytes.NewReader(wavToPCM(wav))
-
-    return cmd.Run()
+func pulseArgs(wav []byte, sink string) ([]string, []byte, error) {
+	decoded, err := audio.DecodePCM16(wav)
+	if err != nil {
+		return nil, nil, err
+	}
+	if sink == "" {
+		sink = "tts2mic_tx"
+	}
+	args := []string{
+		"--device=" + sink, "--raw", "--format=s16le",
+		"--rate=" + strconv.Itoa(decoded.SampleRate),
+		"--channels=" + strconv.Itoa(decoded.Channels),
+	}
+	return args, decoded.Samples, nil
 }
 
-// naive extraction of PCM from WAV (skip header). This is fine for our generated files.
-func wavToPCM(wav []byte) []byte {
-    if len(wav) <= 44 {
-        return wav
-    }
-    return wav[44:]
+func (p *pipewire) Inject(ctx context.Context, wav []byte) error {
+	sink := os.Getenv("TTS2MIC_PULSE_SINK")
+	if sink == "" {
+		sink = os.Getenv("PULSE_SINK") // Legacy CLI configuration.
+	}
+	args, pcm, err := pulseArgs(wav, sink)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "paplay", args...)
+	cmd.Stdin = bytes.NewReader(pcm)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("paplay failed (is the virtual sink configured?): %w: %s", err, stderr.String())
+	}
+	return nil
 }

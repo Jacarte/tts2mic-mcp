@@ -1,167 +1,86 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
-	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestDetachedSpeakArgsWithoutDelay(t *testing.T) {
-	args := detachedSpeakArgs("hello world", 0)
-
-	wanted := []string{"speak", "--target", macOSBackendTarget, "--text", "hello world"}
-	if len(args) != len(wanted) {
-		t.Fatalf("detachedSpeakArgs() len = %d, want %d (%v)", len(args), len(wanted), args)
+func TestParseDelay(t *testing.T) {
+	for input, want := range map[string]time.Duration{"": 0, "0s": 0, "500ms": 500 * time.Millisecond, "1.5s": 1500 * time.Millisecond} {
+		got, err := parseDelay(input)
+		if err != nil || got != want {
+			t.Fatalf("%s: %s %v", input, got, err)
+		}
 	}
-
-	for i := range wanted {
-		if args[i] != wanted[i] {
-			t.Fatalf("detachedSpeakArgs()[%d] = %q, want %q", i, args[i], wanted[i])
+	for _, input := range []string{"-1s", "500", "banana", "2m", "3h"} {
+		if _, err := parseDelay(input); err == nil {
+			t.Fatalf("accepted %q", input)
 		}
 	}
 }
 
-func TestDetachedSpeakArgsWithDelay(t *testing.T) {
-	args := detachedSpeakArgs("hello world", 1500*time.Millisecond)
-
-	wanted := []string{"speak", "--target", macOSBackendTarget, "--text", "hello world", "--delay", "1.5s"}
-	if len(args) != len(wanted) {
-		t.Fatalf("detachedSpeakArgs() len = %d, want %d (%v)", len(args), len(wanted), args)
+func TestWaitDelayIsCancellable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitDelay(ctx, time.Minute); err != context.Canceled {
+		t.Fatal(err)
 	}
+}
 
-	for i := range wanted {
-		if args[i] != wanted[i] {
-			t.Fatalf("detachedSpeakArgs()[%d] = %q, want %q", i, args[i], wanted[i])
+func TestTextAndProviderValidation(t *testing.T) {
+	for _, text := range []string{"", "   ", strings.Repeat("a", 4001)} {
+		if validateText(text) == nil {
+			t.Fatal("invalid text accepted")
+		}
+	}
+	t.Setenv("TTS_PROVIDER", "typo")
+	if _, err := synthesize(context.Background(), "hello", ""); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+}
+
+func TestPrepareAndLoadClip(t *testing.T) {
+	t.Setenv("TTS_PROVIDER", "stub")
+	t.Setenv("TTS_PROVIDER_NAME", "stub")
+	t.Setenv("TTS_CACHE_DIR", t.TempDir())
+	t.Setenv("TTS2MIC_CLIP_DIR", t.TempDir())
+	clip, err := prepareClip(context.Background(), "hello", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clip.SampleRate != 16000 || clip.Channels != 1 || clip.DurationMS != 1000 {
+		t.Fatalf("%+v", clip)
+	}
+	if _, err := loadClip(clip.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clipDirectory(), clip.ID+".wav"), []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadClip(clip.ID); err == nil {
+		t.Fatal("corrupt clip accepted")
+	}
+	for _, id := range []string{"../secret", "", strings.Repeat("A", 64)} {
+		if validateClipID(id) == nil {
+			t.Fatal("invalid clip ID accepted")
 		}
 	}
 }
 
-func TestCurrentWorkingDirectory(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
+func TestLoadDotEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if values, err := loadDotEnvFile(path); err != nil || len(values) != 0 {
+		t.Fatalf("missing .env: %v %v", values, err)
 	}
-
-	got := currentWorkingDirectory()
-	if got != wd {
-		t.Fatalf("currentWorkingDirectory() = %q, want %q", got, wd)
+	if err := os.WriteFile(path, []byte("# note\nexport FOO=bar\nDOUBLE=\"hello world\"\nSINGLE='abc'\nEMPTY=\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestNewDetachedSpeakCommandSetsDetachedProcessState(t *testing.T) {
-	cmd, err := newDetachedSpeakCommand("/bin/echo", "hello world", 2*time.Second)
-	if err != nil {
-		t.Fatalf("newDetachedSpeakCommand() error = %v", err)
-	}
-
-	t.Cleanup(func() {
-		if closer, ok := cmd.Stdin.(*os.File); ok {
-			_ = closer.Close()
-		}
-	})
-
-	wantedArgs := []string{"/bin/echo", "speak", "--target", macOSBackendTarget, "--text", "hello world", "--delay", "2s"}
-	if len(cmd.Args) != len(wantedArgs) {
-		t.Fatalf("cmd.Args len = %d, want %d (%v)", len(cmd.Args), len(wantedArgs), cmd.Args)
-	}
-	for i := range wantedArgs {
-		if cmd.Args[i] != wantedArgs[i] {
-			t.Fatalf("cmd.Args[%d] = %q, want %q", i, cmd.Args[i], wantedArgs[i])
-		}
-	}
-
-	if cmd.Dir != currentWorkingDirectory() {
-		t.Fatalf("cmd.Dir = %q, want %q", cmd.Dir, currentWorkingDirectory())
-	}
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-		t.Fatal("cmd.SysProcAttr.Setpgid = false, want true")
-	}
-	if cmd.Stdin == nil || cmd.Stdout == nil || cmd.Stderr == nil {
-		t.Fatal("detached command stdio should all be redirected")
-	}
-	if len(cmd.Env) == 0 {
-		t.Fatal("detached command environment should inherit current environment")
-	}
-}
-
-func TestLoadDotEnvFileParsesSupportedLines(t *testing.T) {
-	tempDir := t.TempDir()
-	dotenvPath := filepath.Join(tempDir, ".env")
-	content := "# comment\nFOO=bar\nexport HELLO=world\nQUOTED=\"hello world\"\nSINGLE='value'\nEMPTY=\n"
-	if err := os.WriteFile(dotenvPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile(.env) error = %v", err)
-	}
-
-	values, err := loadDotEnvFile(dotenvPath)
-	if err != nil {
-		t.Fatalf("loadDotEnvFile() error = %v", err)
-	}
-
-	wanted := map[string]string{
-		"FOO":    "bar",
-		"HELLO":  "world",
-		"QUOTED": "hello world",
-		"SINGLE": "value",
-		"EMPTY":  "",
-	}
-
-	if len(values) != len(wanted) {
-		t.Fatalf("loadDotEnvFile() len = %d, want %d (%v)", len(values), len(wanted), values)
-	}
-
-	for key, want := range wanted {
-		if got := values[key]; got != want {
-			t.Fatalf("loadDotEnvFile()[%q] = %q, want %q", key, got, want)
-		}
-	}
-}
-
-func TestLoadDotEnvFileMissingReturnsEmptyMap(t *testing.T) {
-	values, err := loadDotEnvFile(filepath.Join(t.TempDir(), ".env"))
-	if err != nil {
-		t.Fatalf("loadDotEnvFile() error = %v", err)
-	}
-	if len(values) != 0 {
-		t.Fatalf("loadDotEnvFile() len = %d, want 0", len(values))
-	}
-}
-
-func TestMergeEnvValuesKeepsInheritedValues(t *testing.T) {
-	base := []string{"FOO=from-env", "BAR=keep"}
-	dotenvValues := map[string]string{
-		"FOO": "from-dotenv",
-		"BAZ": "from-dotenv",
-	}
-
-	merged := mergeEnvValues(base, dotenvValues)
-	if !slices.Contains(merged, "FOO=from-env") {
-		t.Fatalf("mergeEnvValues() missing inherited FOO: %v", merged)
-	}
-	if slices.Contains(merged, "FOO=from-dotenv") {
-		t.Fatalf("mergeEnvValues() should not override inherited FOO: %v", merged)
-	}
-	if !slices.Contains(merged, "BAZ=from-dotenv") {
-		t.Fatalf("mergeEnvValues() missing dotenv-only BAZ: %v", merged)
-	}
-}
-
-func TestDetachedSpeakEnvLoadsSiblingDotEnv(t *testing.T) {
-	tempDir := t.TempDir()
-	execPath := filepath.Join(tempDir, "tts2mic-mcp")
-	if err := os.WriteFile(execPath, []byte(""), 0o755); err != nil {
-		t.Fatalf("WriteFile(exec) error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tempDir, ".env"), []byte("DOTENV_ONLY=loaded\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(.env) error = %v", err)
-	}
-
-	env, err := detachedSpeakEnv(execPath)
-	if err != nil {
-		t.Fatalf("detachedSpeakEnv() error = %v", err)
-	}
-	if !slices.Contains(env, "DOTENV_ONLY=loaded") {
-		t.Fatalf("detachedSpeakEnv() missing dotenv value: %v", env)
+	values, err := loadDotEnvFile(path)
+	if err != nil || values["FOO"] != "bar" || values["DOUBLE"] != "hello world" || values["SINGLE"] != "abc" {
+		t.Fatalf("%v %v", values, err)
 	}
 }

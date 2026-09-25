@@ -1,45 +1,32 @@
 #!/usr/bin/env bash
+# Desktop setup only. CI uses ci/with-audio.sh and a separate audio server.
 set -euo pipefail
-
-# Creates a virtual microphone source that browsers can select via getUserMedia.
-# Works on PipeWire systems that provide pactl compatibility.
-
-SINK_NAME=${SINK_NAME:-tts2mic_sink}
-SINK_DESCRIPTION=${SINK_DESCRIPTION:-TTS2Mic Speaker}
-SOURCE_DESCRIPTION=${SOURCE_DESCRIPTION:-TTS2Mic Simulated Microphone}
-
-if ! command -v pactl >/dev/null 2>&1; then
-  echo "pactl is required. Install pulseaudio-utils or pipewire-pulse tooling." >&2
-  exit 1
+SINK_NAME=${SINK_NAME:-tts2mic_tx}
+SOURCE_NAME=${SOURCE_NAME:-tts2mic_mic}
+OUTPUT_SINK_NAME=${OUTPUT_SINK_NAME:-tts2mic_rx}
+command -v pactl >/dev/null || { echo 'Install pulseaudio-utils and start PulseAudio or pipewire-pulse.' >&2; exit 1; }
+pactl info >/dev/null
+has_node() { pactl list short "$1" | awk '{print $2}' | grep -Fxq -- "$2"; }
+if ! has_node sinks "$SINK_NAME"; then
+  pactl load-module module-null-sink sink_name="$SINK_NAME" rate=48000 channels=1 channel_map=mono >/dev/null
 fi
-
-if pactl list short sinks | awk '{print $2}' | grep -qx "$SINK_NAME"; then
-  echo "Virtual sink already exists: $SINK_NAME"
-else
-  pactl load-module module-null-sink \
-    sink_name="$SINK_NAME" \
-    sink_properties="device.description='$SINK_DESCRIPTION'" >/dev/null
-  echo "Created virtual sink: $SINK_NAME"
+# Chromium filters monitor devices. Expose the monitor through a normal source.
+if ! has_node sources "$SOURCE_NAME"; then
+  pactl load-module module-remap-source source_name="$SOURCE_NAME" master="$SINK_NAME.monitor" \
+    channels=1 channel_map=mono master_channel_map=mono source_properties=device.description=TTS2Mic >/dev/null
 fi
-
-MONITOR_SOURCE="$SINK_NAME.monitor"
-
-if pactl list short sources | awk '{print $2}' | grep -qx "$MONITOR_SOURCE"; then
-  pactl update-source-proplist "$MONITOR_SOURCE" "device.description=$SOURCE_DESCRIPTION" || true
-  echo "Simulated microphone source: $MONITOR_SOURCE"
-else
-  echo "Expected monitor source not found: $MONITOR_SOURCE" >&2
-  pactl list short sources >&2
-  exit 1
+if ! has_node sinks "$OUTPUT_SINK_NAME"; then
+  pactl load-module module-null-sink sink_name="$OUTPUT_SINK_NAME" rate=48000 channels=2 >/dev/null
 fi
+cat <<MSG
+Virtual microphone: $SOURCE_NAME (TTS2Mic)
+Injection sink:     $SINK_NAME
+Reply output sink:  $OUTPUT_SINK_NAME
 
-cat <<EOF
+Injector: TTS2MIC_BACKEND=pipewire TTS2MIC_PULSE_SINK=$SINK_NAME
+Browser:  PULSE_SOURCE=$SOURCE_NAME PULSE_SINK=$OUTPUT_SINK_NAME
+Recorder: parec --device=$OUTPUT_SINK_NAME.monitor --raw --format=s16le --rate=48000 --channels=1
 
-Use this microphone in the browser:
-  Name: $SOURCE_DESCRIPTION
-  Source: $MONITOR_SOURCE
-
-To route generated audio into it, play audio to sink:
-  $SINK_NAME
-
-EOF
+Existing system defaults were not changed. Select TTS2Mic in the app where supported.
+For isolated automated tests, use ci/with-audio.sh instead.
+MSG

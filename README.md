@@ -1,305 +1,235 @@
 # tts2mic-mcp
 
-`tts2mic-mcp` is a Go-based MCP server for end-to-end testing browser voice applications by injecting TTS-generated audio into a simulated microphone.
+A Go MCP server and CLI that inject prepared or synthesized audio through a virtual
+microphone. Linux CI uses an isolated PulseAudio server; native macOS uses
+BlackHole. The browser continues to use its real `getUserMedia()` capture path.
 
-The intended flow is:
+This project supplies the synthetic user's audio input. UI assertions, application
+STT/LLM evaluation, and semantic checks of spoken replies belong in the consuming
+application's test suite. The included browser conformance suite verifies both
+audio directions without API keys or a voice provider.
 
-```text
-MCP client / test runner
-        ↓
-speak(target, text, voice)
-        ↓
-TTS cache lookup
-        ↓
-TTS provider only on cache miss
-        ↓
-PCM / WAV audio
-        ↓
-Virtual microphone backend
-        ↓
-Browser app using getUserMedia / WebRTC / STT
-```
+## Build
 
-The main use case is testing browser apps where Playwright or another automation tool clicks around normally and selects a simulated microphone device, for example `BlackHole 2ch` on macOS.
-
-## Status
-
-This is an early scaffold. It currently includes:
-
-- Go CLI entrypoint
-- MCP server over stdio using `mcp-go`
-- `speak` tool
-- pluggable TTS provider interface
-- deterministic local TTS stub
-- ElevenLabs provider
-- filesystem PCM cache
-- WAV encoding
-- macOS BlackHole backend with direct device-targeted playback
-- Linux PipeWire/PulseAudio backend
-- Chrome fake-audio-file backend
-- setup scripts
-- GitHub Actions CI
-
-It is still intentionally small, but the core MCP transport is already in place.
-
-## Install / build
+Go 1.25.5 and a C compiler are required (`malgo` uses cgo for the existing macOS
+backend). The unit CI matrix builds and runs race tests on Ubuntu and macOS.
 
 ```bash
-go test ./...
+go test -race ./...
 go build -o bin/tts2mic-mcp ./cmd/tts2mic-mcp
 ```
 
-Run the CLI directly:
+## Linux CI: no hardware or credentials
 
 ```bash
-go run ./cmd/tts2mic-mcp speak \
-  --target chrome-file \
-  --text "hello world" \
-  --out /tmp/tts2mic.wav
+docker build -f ci/Dockerfile -t tts2mic-audio-ci .
+docker run --name tts2mic-check --init --shm-size=1g --network=none tts2mic-audio-ci
+docker cp tts2mic-check:/work/artifacts ./artifacts
+docker rm tts2mic-check
 ```
 
-## How to use as an MCP server
+Copy artifacts even after a failed run. No host audio socket, sound device,
+privileged container, or system-wide default-device change is needed. The image
+runs the tests as `pwuser`. Image construction downloads dependencies; the test
+container itself has networking disabled except for its own loopback interface.
+It visits only the trusted local harness, not arbitrary websites.
 
-The server runs over stdio using `mcp-go` and currently exposes a single tool, `speak`.
+The image and `playwright-core` package are both pinned to 1.58.2. Update them
+together. Browser tests use full Chromium's headless mode and remove Playwright's
+`--mute-audio`; they do **not** replace `getUserMedia` or enable fake-device flags.
 
-Start the server:
+The CI audio routes are deliberately separate:
 
-```bash
-go run ./cmd/tts2mic-mcp
+```text
+tts2mic -> tts2mic_tx sink -> tts2mic_mic source -> browser microphone
+browser output -> tts2mic_rx sink -> tts2mic_rx.monitor -> recorder
 ```
 
-Then send one JSON request per line on stdin:
+A remapped source exposes the injection sink monitor as a browser-visible input;
+renaming a monitor is not sufficient for Chromium. Never feed browser output into
+the input sink except in a deliberate feedback test.
 
-```json
-{"name":"speak","arguments":{"target":"macos-blackhole","text":"hello world","voice":"default"}}
-```
+The conformance suite checks:
 
-Example using `printf`:
+- Browser capture of 16, 24 and 48 kHz PCM16 fixtures, including stereo input,
+  pitch/duration checks and a second marker near the end of each clip.
+- Reacquisition of the microphone in fresh browser contexts.
+- Recording of browser playback through a separate sink, without input feedback.
+- Real MCP initialization/tool calls, backend failure reporting, cancellation and
+  EOF cleanup. Fixtures and a deterministic tone stub need no credentials.
 
-```bash
-printf '%s\n' '{"name":"speak","arguments":{"target":"macos-blackhole","text":"hello world","voice":"default"}}' \
-  | go run ./cmd/tts2mic-mcp
-```
+Tests save input/captured WAVs, browser traces and PulseAudio diagnostics under
+`artifacts/audio/`. GitHub Actions uploads them with seven-day retention. One audio
+worker runs per container: parallel jobs need separate audio servers/routes.
+These controlled tests disable AEC/NS/AGC; they do not prove physical-device
+acoustics, production audio processing, STT accuracy or audible speaker quality.
 
-Successful response:
+### Run the same harness on Linux without Docker
 
-```json
-{"ok":true}
-```
-
-Error response:
-
-```json
-{"error":"unknown backend"}
-```
-
-## MCP tool: `speak`
-
-### Input schema
-
-```json
-{
-  "type": "object",
-  "required": ["target", "text"],
-  "properties": {
-    "target": {
-      "type": "string",
-      "description": "Injection backend to use: macos-blackhole, pipewire, or chrome-file"
-    },
-    "text": {
-      "type": "string",
-      "description": "Text to synthesize and inject into the simulated microphone"
-    },
-    "voice": {
-      "type": "string",
-      "description": "Provider-specific voice id. Defaults to default. Used in the cache key."
-    }
-  }
-}
-```
-
-### Go type
-
-```go
-type SpeakInput struct {
-    Target string `json:"target"`
-    Text   string `json:"text"`
-    Voice  string `json:"voice,omitempty"`
-}
-```
-
-### Example request
-
-```json
-{
-  "name": "speak",
-  "arguments": {
-    "target": "macos-blackhole",
-    "text": "hello world",
-    "voice": "en-US-JennyNeural"
-  }
-}
-```
-
-## macOS: simulated microphone with BlackHole
-
-For browser E2E testing on macOS, use BlackHole so the browser sees a real selectable microphone device.
-The `macos-blackhole` backend now opens a playback device directly through CoreAudio via `malgo`, so it does not need the current macOS system output to be switched just to inject speech.
-
-Install/setup:
-
-```bash
-./scripts/setup-macos-blackhole.sh
-```
-
+Install PulseAudio, `pulseaudio-utils`, Node.js 22+, and the Go build prerequisites.
 Then:
 
-1. Open **Audio MIDI Setup**.
-2. Confirm `BlackHole 2ch` exists.
-3. In your browser app, select `BlackHole 2ch` as the microphone.
-4. Inject speech (sine test without provider):
-
 ```bash
-go run ./cmd/tts2mic-mcp speak \
-  --target macos-blackhole \
-  --text "hello world"
+go build -o bin/tts2mic-mcp ./cmd/tts2mic-mcp
+npm --prefix e2e ci
+(cd e2e && npx playwright-core install --with-deps chromium)
+bash ci/with-audio.sh
 ```
 
-By default the backend looks for the first playback device whose name contains `BlackHole`.
-You can override that lookup if needed:
+`ci/with-audio.sh` creates a private runtime/socket, starts a supervised audio server,
+checks readiness and cleans it up when its child command exits. It can wrap a
+consumer application's test command instead:
 
 ```bash
+bash ci/with-audio.sh your-test-command
+```
+
+For tests that call real voice services, permit network access and supply narrowly
+scoped credentials in a separate trusted CI job. The browser and injector must
+share the audio server; a local injector cannot speak into an unrelated remote
+browser.
+
+## Local backends
+
+Backend precedence is explicit `--target` / MCP `target`, then `TTS2MIC_BACKEND`,
+then the OS default (`pipewire` on Linux, `macos-blackhole` on macOS). Unknown
+backends fail instead of silently falling back. Other native OS defaults are not
+implemented; Windows hosts can run the Linux container where supported.
+
+### Linux / PipeWire
+
+The `pipewire` name denotes the PulseAudio-compatible backend: it works with
+PulseAudio or `pipewire-pulse`. Native PipeWire operation is not exercised by the
+container CI; that lane deliberately uses PulseAudio directly.
+
+```bash
+bash scripts/setup-pipewire-virtual-mic.sh
+export TTS2MIC_BACKEND=pipewire
+export TTS2MIC_PULSE_SINK=tts2mic_tx
+# Set these for the browser process, not as a replacement for the injector sink:
+# PULSE_SOURCE=tts2mic_mic PULSE_SINK=tts2mic_rx your-browser-command
+bin/tts2mic-mcp play --file fixtures/command.wav
+```
+
+The setup script creates a remapped microphone and separate reply sink without
+changing desktop defaults. Select `TTS2Mic` in the application where supported.
+`TTS2MIC_PULSE_SINK` takes precedence over the legacy `PULSE_SINK` routing setting;
+without either, the injector explicitly targets `tts2mic_tx`, not system speakers.
+The backend parses PCM16 WAV chunks and passes the actual rate/channel count to
+`paplay`. Unknown chunks/padding are supported; compressed or malformed WAVs fail.
+
+### macOS / BlackHole
+
+```bash
+bash scripts/setup-macos-blackhole.sh
+export TTS2MIC_BACKEND=macos-blackhole
 export TTS2MIC_MACOS_OUTPUT_DEVICE="BlackHole 2ch"
+bin/tts2mic-mcp play --file fixtures/command.wav
 ```
 
+Select the matching BlackHole microphone in the browser. The existing `malgo`
+backend targets the playback device directly; it does not require changing the
+system output. Native device delivery remains a local/manual test: the macOS CI
+job covers builds/unit tests, not a provisioned BlackHole driver. Keep
+`TTS2MIC_MACOS_DEBUG_AFPLAY` and `TTS2MIC_ALLOW_SYSTEM_OUTPUT_ROUTE` unset for timed
+tests, since the debug route plays via system output before device injection.
 
-As a use case, in Playwright, your app can select the mic the same way a user would. For apps that expose an input selector, select `BlackHole 2ch`. For apps using `navigator.mediaDevices.enumerateDevices()`, choose the audio input whose label contains `BlackHole` after microphone permission is granted.
+### Chromium file mode
 
-## Linux: simulated microphone with PipeWire/PulseAudio (not tested yet)
-
-Create a virtual sink and monitor source:
+`chrome-file` only writes a WAV; it does not control a live browser stream.
 
 ```bash
-./scripts/setup-pipewire-virtual-mic.sh
+bin/tts2mic-mcp speak --target chrome-file --text "Hello" --out /tmp/input.wav
+bash scripts/run-chrome-fake-audio.sh /tmp/input.wav http://localhost:3000
 ```
 
-Route playback into the virtual sink:
+Use that mode for separate fake-capture smoke tests, not the device-backed CI lane.
+
+## CLI: prepare independently of playback
 
 ```bash
-export PULSE_SINK=tts2mic_sink
-```
-
-Inject speech:
-
-```bash
-go run ./cmd/tts2mic-mcp speak \
-  --target pipewire \
-  --text "hello world"
-```
-
-Then select the monitor source as the microphone in the browser.
-
-## Chrome fake-audio-file mode
-
-This mode does not create a normal selectable microphone. It is useful for deterministic Chromium automation but is intentionally less realistic than BlackHole/PipeWire.
-
-Generate a WAV file:
-
-```bash
-go run ./cmd/tts2mic-mcp speak \
-  --target chrome-file \
-  --text "hello world" \
-  --out /tmp/tts2mic.wav
-```
-
-Run Chromium with fake media flags:
-
-```bash
-./scripts/run-chrome-fake-audio.sh /tmp/tts2mic.wav https://example.com
-```
-
-## TTS cache
-
-Before calling the TTS provider, the TTS layer checks a filesystem cache.
-
-Logical cache key:
-
-```text
-lang:voice_id:provider:sha256(text)
-```
-
-Default cache directory:
-
-```text
-.tts2mic-cache/
-```
-
-The cache stores raw little-endian `int16` PCM files and is gitignored.
-
-Example layout:
-
-```text
-.tts2mic-cache/
-  stub/
-    und/
-      default/
-        und__default__stub__<sha256>.pcm
-```
-
-Environment variables:
-
-```bash
-export TTS_CACHE_DIR=.tts2mic-cache
-export TTS_PROVIDER_NAME=stub
-export TTS_LANG=en-US
-```
-
-Current behavior:
-
-```text
-first speak call  → cache miss → provider called → PCM stored
-next same call    → cache hit  → provider skipped
-```
-
-When real providers are added, the cache key should also include any options that affect output audio, such as sample rate, speaking rate, pitch, style, and output format.
-
-## TTS providers
-
-The project currently supports two providers:
-
-- **Default test provider**: a deterministic local sine-wave stub used when `TTS_PROVIDER` is unset or set to anything other than `elevenlabs`
-- **Real provider**: ElevenLabs, selected with `TTS_PROVIDER=elevenlabs`
-
-Default local test setup:
-
-```bash
-unset TTS_PROVIDER
-export TTS_PROVIDER_NAME=stub
-export TTS_LANG=en-US
-```
-
-ElevenLabs setup:
-
-```bash
+# Select a real TTS provider for words; the default stub emits a tone.
 export TTS_PROVIDER=elevenlabs
 export ELEVENLABS_API_KEY=...
 export ELEVENLABS_VOICE_ID=...
-export ELEVENLABS_MODEL_ID=eleven_multilingual_v2
 export ELEVENLABS_OUTPUT_FORMAT=pcm_16000
+
+bin/tts2mic-mcp prepare --text "Show my calendar" --out /tmp/calendar.wav
+bin/tts2mic-mcp play --target pipewire --file /tmp/calendar.wav
+bin/tts2mic-mcp speak --text "Show my calendar" --delay 500ms
 ```
 
-Notes:
+`speak` combines synthesis and injection. CLI commands are supervised and return
+nonzero on failure. `prepare` writes a WAV without opening an audio device. `play`
+accepts a regular PCM16 WAV file of at most 64 MiB, so human-recorded fixtures do not
+need a provider. Delay starts **after** synthesis, immediately before injection;
+pre-prepare clips when timing matters. A two-minute deadline includes preparation,
+delay and playback. SIGINT/SIGTERM cancels work.
 
-- `ELEVENLABS_OUTPUT_FORMAT` defaults to `pcm_16000`.
-- If no `voice` is passed to `speak`, the ElevenLabs backend falls back to `ELEVENLABS_VOICE_ID`.
-- `TTS_PROVIDER_NAME` is used as part of the cache key and defaults to `stub` or the value of `TTS_PROVIDER`.
+CLI stdout contains a JSON result; diagnostics go to stderr. `completed` means the
+backend returned successfully, not that the browser captured or the user heard the
+clip. In `chrome-file` mode it means the file was written. For BlackHole, the current
+completion boundary is sample submission/device stop, not independently measured
+playout; use capture-based checks to detect tail loss.
 
-## Roadmap
+## MCP interface
 
-- Add additional real TTS providers beyond ElevenLabs, such as Azure or OpenAI.
-- Add richer device controls for the macOS CoreAudio backend, such as explicit device listing and selection helpers.
-- Add 48 kHz resampling for browser/STT realism.
-- Add Playwright-oriented helpers for browser E2E flows, such as selecting the simulated microphone and asserting setup state.
-- Add transcript assertion helpers.
-- Add higher-level MCP/testing ergonomics on top of the existing server, such as richer tool metadata and reusable test helpers.
-- Add audio fixtures for noise, silence, barge-in, long utterances, and multi-turn flows.
+Run `bin/tts2mic-mcp` (or `bin/tts2mic-mcp serve`) as a stdio MCP server. Use a proper
+MCP client: initialize the JSON-RPC connection, send `notifications/initialized`,
+then call `tools/call`. The old raw `{name, arguments}` stdin example was not a
+complete MCP exchange.
+
+Tools:
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `prepare` | `text`, optional `voice` | Content-addressed `clip_id`, duration, rate, channels; no playback. |
+| `play` | `clip_id`, optional `target`, `delay` | Supervised job snapshot. |
+| `speak` | `text`, optional `voice`, `target`, `delay` | Supervised job snapshot. |
+| `speak_delay` | `text`, `delay_ms`, optional `voice`, `target` | Compatibility alias; `delay_ms` is still a duration string such as `500ms`. |
+| `job_status` | `id` | Current job state and timestamps/error. |
+| `cancel_job` | `id` | Cancellation requested; poll for terminal state. |
+
+Example `tools/call` after initialization:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"speak","arguments":{"text":"Show my calendar","target":"pipewire"}}}
+```
+
+Results include structured content and equivalent JSON text. `speak` now returns a
+job object rather than the old `"ok"` string. Accepted jobs run serially, with at
+most 16 queued and the last 128 terminal jobs retained. States are `queued`,
+`running`, `cancelling`, `completed`, `failed`, and `cancelled`. `running` can include
+synthesis or a delay; it is **not** an audible-start event. The two-minute deadline
+starts at submission, so queue time counts. On cancellation of a queued job, it
+becomes terminal when the worker reaches it; it never plays. EOF/server shutdown
+cancels and joins all outstanding work instead of leaving detached children.
+
+Prepare clips before timed conversations, then trigger `play` after the browser
+observer establishes the desired condition. An application testing agent should
+observe actual captured output and UI state, not infer success from a job result.
+
+## Configuration and retention
+
+`TTS_PROVIDER` is `stub` (also the unset default) or `elevenlabs`; other values fail
+at the CLI/MCP boundary. The stub emits a 440 Hz tone, not speech. ElevenLabs also
+uses `ELEVENLABS_MODEL_ID` (default `eleven_multilingual_v2`),
+`ELEVENLABS_VOICE_ID`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_OUTPUT_FORMAT`.
+Use raw PCM output formats, not MP3. Provider/cache behavior beyond the portable
+audio work is unchanged in this PR; in particular, the existing synthesis cache
+key does not include the model ID. Use separate `TTS_CACHE_DIR` values when changing
+models until that cache contract is expanded.
+
+`TTS_CACHE_DIR` defaults to `.tts2mic-cache`, with `TTS_PROVIDER_NAME` and `TTS_LANG`
+participating in the existing cache key. `TTS2MIC_CLIP_DIR` defaults to
+`.tts2mic-clips`; prepared clip IDs hash the exact WAV bytes, and loading checks the
+hash. Clip storage has no automatic retention policy: delete test caches/clips as
+part of environment cleanup. Recorded speech can be sensitive; use synthetic
+fixtures or consented recordings, do not commit credentials, and define artifact
+retention in consuming projects.
+
+A `.env` beside the compiled executable is still read; inherited environment
+variables win. The Go dependency set remains unchanged. No secrets, transcript
+text or audio are written to MCP stdout except explicit tool results.
+
+MIT licensed — see [LICENSE](LICENSE).
