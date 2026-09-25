@@ -17,13 +17,16 @@ let browser, server, baseURL;
 before(async () => {
   await mkdir(artifacts, {recursive: true});
   const html = await readFile(new URL('./harness.html', import.meta.url));
-  const microphone = await readFile(new URL('./microphone.mjs', import.meta.url));
+  const modules = new Map();
+  for (const name of ['microphone.mjs', 'track-capture.mjs']) {
+    modules.set(`/${name}`, await readFile(new URL(`./${name}`, import.meta.url)));
+  }
   const output = encodeWav(markerSamples(48000), 48000);
   server = createServer((req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
-    if (path === '/microphone.mjs') {
+    if (modules.has(path)) {
       res.setHeader('Content-Type', 'text/javascript');
-      res.end(microphone);
+      res.end(modules.get(path));
     } else {
       res.setHeader('Content-Type', path === '/output.wav' ? 'audio/wav' : 'text/html');
       res.end(path === '/output.wav' ? output : html);
@@ -56,14 +59,27 @@ async function captureTest(name, body, mode = 'explicit') {
       assert.equal(input.captured.settings.deviceId, input.selected.deviceId,
         `browser captured the wrong device: ${JSON.stringify(input)}`);
     }
-    await page.evaluate(() => { window.mic.samples = []; window.mic.recording = true; });
+    await page.evaluate(() => {
+      window.mic.samples = []; window.mic.frames = [];
+      window.renderedMic.samples = []; window.mic.recording = true;
+    });
     await body(page);
+    await page.evaluate(() => window.stopCapture());
+    assert.equal(await page.evaluate(() => window.problem), undefined);
+    const discarded = await page.evaluate(() => window.input.discardedFrames);
+    if (discarded !== null) assert.equal(discarded, 0, 'raw microphone observer dropped frames');
   } finally {
     try {
+      await page.evaluate(() => window.stopCapture?.()).catch(() => {});
       const input = await page.evaluate(() => ({input: window.input, problem: window.problem})).catch(error => ({error: String(error)}));
       await writeFile(resolve(artifacts, `${name}-devices.json`), JSON.stringify(input, null, 2));
       const mic = await page.evaluate(() => window.mic).catch(() => null);
-      if (mic?.rate) await writeFile(resolve(artifacts, `${name}-mic.wav`), encodeWav(mic.samples, mic.rate));
+      if (mic?.rate) {
+        await writeFile(resolve(artifacts, `${name}-mic.wav`), encodeWav(mic.samples, mic.rate));
+        await writeFile(resolve(artifacts, `${name}-frames.json`), JSON.stringify({rate: mic.rate, channels: mic.channels, frames: mic.frames}, null, 2));
+      }
+      const rendered = await page.evaluate(() => window.renderedMic).catch(() => null);
+      if (rendered?.rate) await writeFile(resolve(artifacts, `${name}-webaudio.wav`), encodeWav(rendered.samples, rendered.rate));
       await context.tracing.stop({path: resolve(artifacts, `${name}-trace.zip`)});
     } finally {
       await context.close();
