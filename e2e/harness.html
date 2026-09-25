@@ -3,17 +3,26 @@
 <title>TTS2Mic audio conformance</title>
 <button id="start">Start microphone</button>
 <button id="play">Play output fixture</button>
-<script>
-let context, source;
+<script type="module">
+import { audioConstraints, openTestMicrophone } from './microphone.mjs';
+let context, source, stream;
 window.mic = { samples: [], recording: false, rate: 0 };
+window.input = {mode: new URLSearchParams(location.search).get('input') || 'explicit'};
 document.querySelector('#start').onclick = async () => {
   try {
     context = new AudioContext();
     await context.resume();
-    const stream = await navigator.mediaDevices.getUserMedia({audio: {
-      echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-    }});
-    window.inputLabel = stream.getAudioTracks()[0].label;
+    if (window.input.mode === 'explicit') {
+      stream = await openTestMicrophone(navigator.mediaDevices, window.input);
+    } else if (window.input.mode === 'default') {
+      // Exercise the app's normal default route separately. Its label may simply
+      // be "Default"; only the captured fixture can prove correct routing.
+      stream = await navigator.mediaDevices.getUserMedia({audio: {...audioConstraints}});
+      const track = stream.getAudioTracks()[0];
+      window.input.captured = {label: track.label, settings: track.getSettings()};
+    } else {
+      throw new Error(`Unknown input mode: ${window.input.mode}`);
+    }
     window.mic.rate = context.sampleRate;
     const url = URL.createObjectURL(new Blob([`
       registerProcessor('capture', class extends AudioWorkletProcessor {
@@ -28,12 +37,18 @@ document.querySelector('#start').onclick = async () => {
     source = context.createMediaStreamSource(stream);
     const capture = new AudioWorkletNode(context, 'capture');
     capture.port.onmessage = event => {
+      // Readiness means the real capture graph has delivered a frame, not just
+      // that getUserMedia resolved. Silence is a valid frame here.
+      window.ready = true;
       if (window.mic.recording && window.mic.samples.length < 20 * context.sampleRate) window.mic.samples.push(...event.data);
     };
     const silent = context.createGain(); silent.gain.value = 0;
     source.connect(capture).connect(silent).connect(context.destination);
-    window.ready = true;
-  } catch (error) { window.problem = String(error); }
+  } catch (error) {
+    window.problem = String(error);
+    stream?.getTracks().forEach(track => track.stop());
+    await context?.close();
+  }
 };
 document.querySelector('#play').onclick = async () => {
   try {

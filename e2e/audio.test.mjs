@@ -17,10 +17,17 @@ let browser, server, baseURL;
 before(async () => {
   await mkdir(artifacts, {recursive: true});
   const html = await readFile(new URL('./harness.html', import.meta.url));
+  const microphone = await readFile(new URL('./microphone.mjs', import.meta.url));
   const output = encodeWav(markerSamples(48000), 48000);
   server = createServer((req, res) => {
-    res.setHeader('Content-Type', req.url === '/output.wav' ? 'audio/wav' : 'text/html');
-    res.end(req.url === '/output.wav' ? output : html);
+    const path = new URL(req.url, 'http://localhost').pathname;
+    if (path === '/microphone.mjs') {
+      res.setHeader('Content-Type', 'text/javascript');
+      res.end(microphone);
+    } else {
+      res.setHeader('Content-Type', path === '/output.wav' ? 'audio/wav' : 'text/html');
+      res.end(path === '/output.wav' ? output : html);
+    }
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   baseURL = `http://127.0.0.1:${server.address().port}`;
@@ -32,23 +39,35 @@ before(async () => {
 
 after(async () => { await browser?.close(); if (server) await new Promise(resolve => server.close(resolve)); });
 
-async function captureTest(name, body) {
+async function captureTest(name, body, mode = 'explicit') {
   const context = await browser.newContext({permissions: ['microphone']});
   await context.tracing.start({screenshots: true, snapshots: true});
   const page = await context.newPage();
   try {
-    await page.goto(baseURL);
+    await page.goto(`${baseURL}/?input=${mode}`);
     await page.click('#start');
     await page.waitForFunction(() => window.ready || window.problem);
     assert.equal(await page.evaluate(() => window.problem), undefined);
-    assert.match(await page.evaluate(() => window.inputLabel), /TTS2Mic/i, 'browser captured the wrong device');
+    const input = await page.evaluate(() => window.input);
+    assert.equal(input.mode, mode);
+    if (mode === 'explicit') {
+      assert.match(input.selected.label, /TTS2Mic/i);
+      assert.ok(!['default', 'communications'].includes(input.selected.deviceId));
+      assert.equal(input.captured.settings.deviceId, input.selected.deviceId,
+        `browser captured the wrong device: ${JSON.stringify(input)}`);
+    }
     await page.evaluate(() => { window.mic.samples = []; window.mic.recording = true; });
     await body(page);
   } finally {
-    const mic = await page.evaluate(() => window.mic).catch(() => null);
-    if (mic?.rate) await writeFile(resolve(artifacts, `${name}-mic.wav`), encodeWav(mic.samples, mic.rate));
-    await context.tracing.stop({path: resolve(artifacts, `${name}-trace.zip`)});
-    await context.close();
+    try {
+      const input = await page.evaluate(() => ({input: window.input, problem: window.problem})).catch(error => ({error: String(error)}));
+      await writeFile(resolve(artifacts, `${name}-devices.json`), JSON.stringify(input, null, 2));
+      const mic = await page.evaluate(() => window.mic).catch(() => null);
+      if (mic?.rate) await writeFile(resolve(artifacts, `${name}-mic.wav`), encodeWav(mic.samples, mic.rate));
+      await context.tracing.stop({path: resolve(artifacts, `${name}-trace.zip`)});
+    } finally {
+      await context.close();
+    }
   }
 }
 
@@ -75,6 +94,20 @@ for (const rate of [16000, 24000, 48000]) {
     });
   });
 }
+
+// Exact-device tests must not mask a broken default route used by real apps.
+// Accept any default track label, but require the actual injected audio markers.
+test('default microphone route captures the injected fixture regardless of its label', {timeout: 30000}, async () => {
+  const file = resolve(artifacts, 'input-default.wav');
+  await writeFile(file, encodeWav(markerSamples(24000), 24000));
+  await captureTest('input-default', async page => {
+    await exec(binary, ['play', '--target', 'pipewire', '--file', file], {timeout: 15000});
+    const afterDrain = await page.evaluate(() => window.mic.samples.length);
+    await page.waitForFunction(count => window.mic.samples.length >= count + window.mic.rate * 0.5, afterDrain);
+    const mic = await page.evaluate(() => window.mic);
+    assertMarkers(mic.samples, mic.rate);
+  }, 'default');
+});
 
 function recorder() {
   const child = spawn('parec', ['--device=tts2mic_rx.monitor', '--raw', '--format=s16le', '--rate=48000', '--channels=1']);
